@@ -48,33 +48,42 @@ final readonly class ChatEventDto
 
     public function withActor(string $actorUserId): self
     {
-        return new self(
-            $this->eventId,
-            $this->originNodeId,
-            $this->originDeviceId,
-            $actorUserId,
-            $this->chatId,
-            $this->type,
-            $this->payload,
-            $this->createdAt,
-            $this->logicalClock,
-            $this->syncStatus,
-        );
+        return $this->copy(actorUserId: $actorUserId);
+    }
+
+    public function withChatId(string $chatId): self
+    {
+        $payload = $this->payload;
+        if (array_key_exists('chatId', $payload)) {
+            $payload['chatId'] = $chatId;
+        }
+
+        return $this->copy(chatId: $chatId, payload: $payload);
     }
 
     public function withSyncStatus(EventSyncStatus $syncStatus): self
     {
+        return $this->copy(syncStatus: $syncStatus);
+    }
+
+    /** @param array<string, mixed>|null $payload */
+    private function copy(
+        ?string $actorUserId = null,
+        ?string $chatId = null,
+        ?array $payload = null,
+        ?EventSyncStatus $syncStatus = null,
+    ): self {
         return new self(
             $this->eventId,
             $this->originNodeId,
             $this->originDeviceId,
-            $this->actorUserId,
-            $this->chatId,
+            $actorUserId ?? $this->actorUserId,
+            $chatId ?? $this->chatId,
             $this->type,
-            $this->payload,
+            $payload ?? $this->payload,
             $this->createdAt,
             $this->logicalClock,
-            $syncStatus,
+            $syncStatus ?? $this->syncStatus,
         );
     }
 

@@ -2,12 +2,16 @@
 
 namespace App\Providers;
 
+use App\Contracts\ChatListQueryRepositoryInterface;
 use App\Contracts\ChatProjectionRepositoryInterface;
-use App\Contracts\ChatQueryRepositoryInterface;
 use App\Contracts\EventRepositoryInterface;
+use App\Contracts\MessageQueryRepositoryInterface;
+use App\Contracts\UserQueryRepositoryInterface;
+use App\Infrastructure\PostgresChatListQueryRepository;
 use App\Infrastructure\PostgresChatProjectionRepository;
-use App\Infrastructure\PostgresChatQueryRepository;
 use App\Infrastructure\PostgresEventRepository;
+use App\Infrastructure\PostgresMessageQueryRepository;
+use App\Infrastructure\PostgresUserQueryRepository;
 use Illuminate\Support\ServiceProvider;
 
 final class AppServiceProvider extends ServiceProvider
@@ -16,6 +20,8 @@ final class AppServiceProvider extends ServiceProvider
     {
         $this->app->bind(EventRepositoryInterface::class, PostgresEventRepository::class);
         $this->app->bind(ChatProjectionRepositoryInterface::class, PostgresChatProjectionRepository::class);
-        $this->app->bind(ChatQueryRepositoryInterface::class, PostgresChatQueryRepository::class);
+        $this->app->bind(UserQueryRepositoryInterface::class, PostgresUserQueryRepository::class);
+        $this->app->bind(ChatListQueryRepositoryInterface::class, PostgresChatListQueryRepository::class);
+        $this->app->bind(MessageQueryRepositoryInterface::class, PostgresMessageQueryRepository::class);
     }
 }

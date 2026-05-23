@@ -14,15 +14,16 @@ interface EventRepositoryInterface
 
     public function findChatCreatedEvent(string $chatId): ?ChatEventDto;
 
-    public function latestLogicalClockForOriginDevice(string $originDeviceId): ?int;
+    public function maxLogicalClockForDevice(string $originDeviceId): ?int;
 
     /** @return array<int, ChatEventDto> */
-    public function findSince(int $sequence, int $limit): array;
+    public function findSince(int $sequence, int $limit = 100): array;
+
+    /** @return list<array{sequence: int, event: ChatEventDto}> */
+    public function findSinceWithSequences(int $sequence, int $limit = 100): array;
 
     /** @return array<int, ChatEventDto> */
-    public function all(int $limit): array;
+    public function all(): array;
 
     public function currentSequence(): int;
-
-    public function count(): int;
 }

@@ -9,40 +9,34 @@ final readonly class SyncEventsResultDto
     /**
      * @param  array<int, string>  $accepted
      * @param  array<int, string>  $duplicates
-     * @param  array<int, SyncConflictDto>  $conflicts
+     * @param  array<int, array<string, mixed>>  $conflicts
      * @param  array<int, ChatEventDto>  $serverEvents
-     * @param  array<string, mixed>  $meta
      */
     public function __construct(
         public array $accepted,
         public array $duplicates,
         public array $conflicts,
         public array $serverEvents,
-        public array $meta,
+        public bool $dryRun = false,
     ) {}
 
     /** @return array<string, mixed> */
     public function toResponseArray(): array
     {
-        $conflictIds = array_map(
-            fn (SyncConflictDto $conflict): string => $conflict->eventId,
-            $this->conflicts,
-        );
+        $centralNodeId = config('durable-chat.central_node_id');
 
         return [
             'accepted' => $this->accepted,
             'duplicates' => $this->duplicates,
-            'conflictIds' => $conflictIds,
-            'conflicts' => array_map(
-                fn (SyncConflictDto $conflict): array => $conflict->toArray(),
-                $this->conflicts,
-            ),
+            'conflicts' => $this->conflicts,
             'serverEvents' => array_map(
                 fn (ChatEventDto $event): array => $event->toArray(),
                 $this->serverEvents,
             ),
-            'centralNodeId' => config('durable-chat.central_node_id'),
-            'meta' => $this->meta,
+            'centralNodeId' => $centralNodeId,
+            'nodeRole' => 'central',
+            'nodeId' => $centralNodeId,
+            'dryRun' => $this->dryRun,
         ];
     }
 }

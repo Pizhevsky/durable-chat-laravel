@@ -4,27 +4,24 @@ namespace App\Application\Sync;
 
 use App\Application\Events\ApplyChatEventService;
 use App\Domain\Events\ChatEventDto;
-use App\Domain\Shared\DomainRuleException;
-use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Str;
+use App\Domain\Events\EventType;
 use Throwable;
 
 final readonly class SyncEventsService
 {
     public function __construct(
         private ApplyChatEventService $applyEvent,
-        private SyncConflictFactory $conflictFactory,
+        private SyncConflictMapper $conflictMapper,
     ) {}
 
     /** @param array<int, array<string, mixed>> $eventRows */
-    public function sync(array $eventRows, string $sourceNodeId = 'unknown'): SyncEventsResultDto
+    public function sync(array $eventRows): SyncEventsResultDto
     {
-        $syncAttemptId = (string) Str::uuid();
-        $startedAt = now()->toISOString();
         $accepted = [];
         $duplicates = [];
         $conflicts = [];
         $serverEvents = [];
+        $chatIdAliases = [];
 
         foreach ($eventRows as $eventRow) {
             $eventId = is_array($eventRow) && is_string($eventRow['eventId'] ?? null)
@@ -32,7 +29,7 @@ final readonly class SyncEventsService
                 : 'unknown';
 
             try {
-                $event = ChatEventDto::fromArray($eventRow);
+                $event = ChatEventDto::fromArray($this->applyChatIdAliases($eventRow, $chatIdAliases));
                 $result = $this->applyEvent->apply($event);
 
                 $serverEvents[] = $result->event;
@@ -41,47 +38,43 @@ final readonly class SyncEventsService
                 } else {
                     $duplicates[] = $event->eventId;
                 }
-            } catch (DomainRuleException $exception) {
-                $conflict = $this->conflictFactory->fromDomainException($eventId, $exception);
-                $conflicts[] = $conflict;
-                Log::warning('durable-chat.sync.event_conflict', [
-                    'syncAttemptId' => $syncAttemptId,
-                    'sourceNodeId' => $sourceNodeId,
-                    'eventId' => $eventId,
-                    'code' => $conflict->code,
-                    'category' => $conflict->category,
-                ]);
-            } catch (Throwable $exception) {
-                $conflict = $this->conflictFactory->fromThrowable($eventId, $exception);
-                $conflicts[] = $conflict;
-                Log::error('durable-chat.sync.event_error', [
-                    'syncAttemptId' => $syncAttemptId,
-                    'sourceNodeId' => $sourceNodeId,
-                    'eventId' => $eventId,
-                    'exception' => $exception::class,
-                    'message' => $exception->getMessage(),
-                ]);
+
+                if ($this->isDirectChatCreated($event) && $result->event->chatId !== $event->chatId) {
+                    $chatIdAliases[$event->chatId] = $result->event->chatId;
+                }
+            } catch (Throwable $error) {
+                $conflicts[] = $this->conflictMapper->fromThrowable($eventId, $error);
             }
         }
 
-        $meta = [
-            'syncAttemptId' => $syncAttemptId,
-            'sourceNodeId' => $sourceNodeId,
-            'receivedAt' => $startedAt,
-            'completedAt' => now()->toISOString(),
-            'orderingPolicy' => 'batch-order-with-per-device-logical-clock',
-            'replayGuarantee' => 'eventId and direct-chat uniqueness are idempotent; accepted events are returned in central sequence order by pull sync',
-            'counts' => [
-                'received' => count($eventRows),
-                'accepted' => count($accepted),
-                'duplicates' => count($duplicates),
-                'conflicts' => count($conflicts),
-                'serverEvents' => count($serverEvents),
-            ],
-        ];
+        return new SyncEventsResultDto($accepted, $duplicates, $conflicts, $serverEvents);
+    }
 
-        Log::info('durable-chat.sync.completed', $meta);
+    /**
+     * @param  array<string, mixed>  $eventRow
+     * @param  array<string, string>  $chatIdAliases
+     * @return array<string, mixed>
+     */
+    private function applyChatIdAliases(array $eventRow, array $chatIdAliases): array
+    {
+        $chatId = $eventRow['chatId'] ?? null;
+        if (! is_string($chatId) || ! isset($chatIdAliases[$chatId])) {
+            return $eventRow;
+        }
 
-        return new SyncEventsResultDto($accepted, $duplicates, $conflicts, $serverEvents, $meta);
+        $canonicalChatId = $chatIdAliases[$chatId];
+        $eventRow['chatId'] = $canonicalChatId;
+
+        if (isset($eventRow['payload']) && is_array($eventRow['payload'])) {
+            $eventRow['payload']['chatId'] = $canonicalChatId;
+        }
+
+        return $eventRow;
+    }
+
+    private function isDirectChatCreated(ChatEventDto $event): bool
+    {
+        return $event->type === EventType::ChatCreated
+            && ($event->payload['type'] ?? null) === 'direct';
     }
 }

@@ -2,12 +2,12 @@
 
 namespace App\Application\Messages;
 
-use App\Contracts\ChatQueryRepositoryInterface;
+use App\Contracts\MessageQueryRepositoryInterface;
 use App\Domain\Shared\DomainRuleException;
 
 final readonly class ListMessagesService
 {
-    public function __construct(private ChatQueryRepositoryInterface $queries) {}
+    public function __construct(private MessageQueryRepositoryInterface $queries) {}
 
     /** @return array<int, array<string, mixed>> */
     public function list(string $chatId, string $userId): array

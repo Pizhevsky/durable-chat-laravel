@@ -1,113 +1,168 @@
-# PHP 8.x OOP design
+# PHP 8.x OOP Design
 
-The Laravel central server keeps HTTP concerns, application use cases, domain rules and PostgreSQL persistence in separate layers.
+## Design goal
 
-## HTTP layer
-
-Controllers live in:
+Laravel handles routing, dependency injection, middleware, migrations and HTTP responses. The durable chat rules live in typed PHP classes.
 
 ```txt
-app/Http/Controllers
+Controller -> Application service -> Domain service -> Repository -> PostgreSQL
 ```
 
-They read request data, call an application service and return JSON.
+## Main boundaries
 
-They do not own event validation, projection, idempotency or sync rules.
+| Layer | Responsibility |
+|---|---|
+| Controllers | HTTP request and JSON response |
+| Application services | Use case orchestration |
+| DTOs | Explicit typed boundaries between layers |
+| Enums | Controlled event and status values |
+| Domain services | Validation, projection, pair key rules |
+| Repositories | Persistence contracts |
+| Infrastructure | PostgreSQL/Eloquent query implementation |
 
-## Application layer
+## Thin controllers
 
-Use case services live in:
+Controllers do not contain projection rules or database invariants. For example, `SyncController` reads the incoming `events` array, calls `SyncEventsService`, and returns the result.
+
+That keeps controller code small and makes sync rules easier to test.
+
+## Application services
+
+Important use cases are represented by application services:
 
 ```txt
-app/Application
-```
-
-Examples:
-
-```txt
-ApplyChatEventService
-ListMessagesService
-SyncConflictFactory
 SyncEventsService
+ApplyChatEventService
 ExportRecoveryDumpService
 ImportRecoveryDumpService
+RecoveryChecksum
 ```
 
-These classes coordinate complete application operations. They keep request handling separate from durable chat behaviour.
+These classes coordinate validation, persistence and projection.
 
-## Domain layer
+## DTOs
 
-Domain logic lives in:
-
-```txt
-app/Domain
-```
-
-Examples:
+DTOs make event boundaries explicit:
 
 ```txt
 ChatEventDto
-CausalOrderingPolicy
-EventType
-EventSyncStatus
-EventValidator
-EventProjector
-DirectChatKeyFactory
-DomainRuleException
+ApplyEventResultDto
+SyncEventsResultDto
 ```
 
-Important rules live here:
+The event DTO carries the central sync contract:
 
-- event IDs must use the expected device event format
-- direct chats must have exactly two unique participants
-- direct chat pair keys must be canonical
-- message text cannot be empty
-- event chat IDs must match payload chat IDs
-- only active members can send or read messages
-- only group owners can change group membership
-- repeated events must be idempotent
+```txt
+event id
+origin node id
+origin device id
+actor user id
+chat id
+event type
+payload
+created time
+logical clock
+sync status
+```
 
-## Infrastructure layer
+## Enums
 
-Database implementations live in:
+Enums avoid uncontrolled string values inside the domain layer:
+
+```txt
+EventType
+EventSyncStatus
+ChatType
+```
+
+PostgreSQL check constraints also protect the same controlled values below application code.
+
+## Domain services
+
+The most important domain services are:
+
+```txt
+EventValidator
+EventPayloadValidator
+EventPayloadFields
+EventProjector
+EventProjectionRules
+DirectChatKeyFactory
+```
+
+`EventValidator` checks event envelope fields before projection. `EventPayloadValidator`
+and `EventPayloadFields` keep event-specific payload rules and primitive field checks
+separate.
+
+`EventProjector` updates read models from accepted events. `EventProjectionRules`
+holds reusable guard checks such as active membership, known users and group
+ownership.
+
+`DirectChatKeyFactory` creates a canonical sorted pair key so a direct chat has one identity regardless of participant order.
+
+## Repository interfaces
+
+Application and domain services depend on interfaces:
+
+```txt
+EventRepositoryInterface
+ChatProjectionRepositoryInterface
+UserQueryRepositoryInterface
+ChatListQueryRepositoryInterface
+MessageQueryRepositoryInterface
+```
+
+The PostgreSQL implementation sits under:
 
 ```txt
 app/Infrastructure
 ```
 
-Current classes:
+This keeps the central sync logic from depending directly on controller code or raw database calls.
+
+Query-side infrastructure is split by read responsibility:
 
 ```txt
-PostgresChatProjectionRepository
-PostgresChatQueryRepository
-PostgresChatSummaryLoader
-PostgresEventRepository
+PostgresUserQueryRepository
+PostgresChatListQueryRepository
+PostgresMessageQueryRepository
+PostgresChatMemberQuery
+PostgresChatSummaryQuery
 PostgresMessageHydrator
+PostgresEventMapper
+PostgresProjectionMapper
+PostgresDateTime
 ```
 
-Application and domain code depend on interfaces rather than PostgreSQL implementation details.
+That keeps user listing, chat summaries, message reads, member loading and
+message/event hydration from accumulating in one broad repository.
 
-```txt
-EventRepositoryInterface
-ChatProjectionRepositoryInterface
-ChatQueryRepositoryInterface
-```
+## Database constraints as part of design
 
-This keeps sync rules testable and makes persistence boundaries explicit.
+The project does not rely only on service code for correctness. The migration adds constraints for:
 
-## PHP 8.x practices used
+- unique event ids
+- unique direct pair keys
+- unique chat membership rows
+- unique message ids
+- controlled event types
+- controlled sync statuses
+- non-negative logical clocks
 
-- Constructor property promotion
-- Readonly DTOs
-- Enums for event types and sync statuses
-- Typed method arguments and return types
-- Small final classes for focused responsibilities
-- Explicit domain exceptions
-- Repository interfaces for persistence boundaries
-- Match expressions for event dispatch
+That is important for a resilient sync system because retries, recovery imports and helper reconnects can repeat the same logical action.
 
-## Central server boundary
+## Tests that protect the design
 
-Laravel is always the central authority. It stores the durable event log, validates sync batches, applies idempotency rules and projects chat state into PostgreSQL.
+| Test | Purpose |
+|---|---|
+| `HelperContractTest` | Verifies helper-facing API response shape |
+| `IdempotencyProjectionTest` | Verifies duplicate retries do not duplicate projections |
+| `DirectChatDuplicateProtectionTest` | Verifies same direct pair creates one chat |
+| `PostgresConstraintTest` | Verifies database constraints protect invariants |
+| `RecoveryDryRunTest` | Verifies recovery preview does not write rows |
+| `EventValidatorTest` | Verifies invalid domain payloads are rejected |
+| `DirectChatKeyFactoryTest` | Verifies pair key canonicalisation |
 
-The original Node.js helper remains outside this codebase. It handles local realtime communication, retry and offline tolerant behaviour near the client.
+## Why this matters
+
+The project is small enough to read, but structured like a real backend component. The code shows that the central server has clear responsibilities, explicit contracts and protected invariants.

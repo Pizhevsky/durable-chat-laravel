@@ -1,22 +1,18 @@
-# Connect the original Node.js helper to Laravel central
+# Original Helper Integration
 
-This setup keeps the original helper and replaces only the old Node.js central backend.
+## Goal
+
+Use the existing Durable Chat Relay helper as the browser facing local resilience layer, while Laravel becomes the central sync authority.
 
 ```txt
-Laravel central server on :8000
-Original Node helper on :3001
-Vue client on :1234
+Vue client -> Node helper -> Laravel central -> PostgreSQL
 ```
 
-Laravel does not run in helper mode. The `NODE_ROLE` setting remains part of the original Node project only, because that project still needs to start the helper process.
-
-## 1. Start Laravel central
-
-From this Laravel project:
+## Start Laravel central
 
 ```bash
-cp .env.example .env
 composer install
+cp .env.example .env
 php artisan key:generate
 php artisan migrate:fresh --seed
 php artisan serve --host=127.0.0.1 --port=8000
@@ -26,113 +22,110 @@ Check:
 
 ```bash
 curl http://127.0.0.1:8000/api/health
+curl http://127.0.0.1:8000/api/readiness
 ```
 
-Expected:
+## Start the original helper and Vue client
 
-```json
-{
-  "ok": true,
-  "service": "durable-chat-laravel-central",
-  "centralNodeId": "laravel-central"
-}
-```
-
-## 2. Start the original helper
-
-From the original Durable Chat Relay project:
+In the original project:
 
 ```bash
-CENTRAL_URL=http://127.0.0.1:8000 npm run helper
+npm run dev:laravel
 ```
 
-The existing helper script normally sets:
-
-```txt
-NODE_ROLE=helper
-PORT=3001
-DATABASE_PATH=./data/helper.sqlite
-```
-
-`CENTRAL_URL` points the helper to Laravel instead of the old Node central server.
-
-## 3. Start the existing Vue client
-
-From the original project:
+Or run them separately:
 
 ```bash
+npm run helper:laravel
 npm run dev:client
 ```
 
 Open:
 
 ```txt
-http://localhost:1234/?api=http://localhost:3001
+http://localhost:1234?api=http://localhost:3001
 ```
 
-The query parameter tells the frontend to talk to the helper on port `3001`.
+## What not to run
 
-## 4. Optional package script
-
-Add this script to the original project's `package.json` for a clear Laravel backed helper command:
-
-```json
-"helper:laravel": "NODE_ROLE=helper PORT=3001 DATABASE_PATH=./data/helper.sqlite NODE_ID=helper-demo CENTRAL_URL=http://127.0.0.1:8000 tsx server/index.ts"
-```
-
-Then run:
+Do not run the old Node central server for the Laravel central demo:
 
 ```bash
-npm run helper:laravel
-```
-
-## 5. What should not run
-
-Do not run this as the central backend for this architecture:
-
-```bash
+npm run dev
 npm run dev:central
 ```
 
-That command starts the old Node central backend. The central authority is now Laravel and PostgreSQL.
+Those commands test the original Node central path. Laravel owns the central API in this setup.
 
-## 6. Technical flow
+Do not point the Vue app at `http://127.0.0.1:8000`. Laravel does not host the client's Socket.IO endpoint.
 
-When a user sends a message:
+## Helper contract
+
+The helper sends local or recovered events to:
+
+```http
+POST /api/sync/events
+```
+
+The helper pulls missed central events from:
+
+```http
+GET /api/sync/events?since=0&limit=200
+```
+
+Both requests must be signed with the HMAC helper headers documented in `docs/helper-central-auth.md`.
+
+## Sync response compatibility
+
+Laravel keeps these response fields for the original helper contract:
 
 ```txt
-Vue client
-  -> original Node helper through Socket.IO / local API
-  -> helper stores locally in SQLite
-  -> helper pushes pending events to Laravel POST /api/sync/events
-  -> Laravel validates and stores events in PostgreSQL
-  -> helper pulls missed central events from GET /api/sync/events?since=...
+accepted
+duplicates
+conflicts
+serverEvents
+latestSequence
+currentSequence
+hasMore
+nodeRole
+nodeId
+centralNodeId
 ```
 
-Laravel is the source of truth. The helper is the local resilience layer.
+`nodeRole` and `nodeId` are fixed compatibility fields. Laravel is still always the central server and cannot be configured as a helper.
 
-## 7. Smoke checks
+## Multi helper reconciliation
 
-Laravel central:
+If two helpers create the same direct chat offline, Laravel keeps one canonical central chat id. The losing helper receives the central `chat.created` event and remaps its local duplicate chat id before retrying pending messages.
 
-```bash
-curl http://127.0.0.1:8000/api/users
-```
-
-Original helper:
-
-```bash
-curl http://127.0.0.1:3001/api/health
-```
-
-Frontend override:
+This protects the integrated system from this failure mode:
 
 ```txt
-http://localhost:1234/?api=http://localhost:3001
+Helper A creates chat-a for Denis and Anna.
+Helper B creates chat-b for Denis and Anna.
+Both sync later.
+The system must not leave two direct chats for the same pair.
 ```
 
-## 8. Bridge versus helper
+Expected result:
 
-A bridge only translates one protocol to another. The original helper is not just a bridge.
+```txt
+one central direct chat
+helpers remapped to the central chat id
+pending messages rewritten to the central chat id
+browser state reconciled after central event application
+```
 
-It provides local realtime behaviour, local SQLite durability, retry, pull sync and peer assisted recovery paths. Those responsibilities make it a local resilience layer.
+## Reset before a clean demo
+
+For a clean helper and Laravel demo, reset:
+
+```txt
+Laravel PostgreSQL database
+helper SQLite database
+browser localStorage
+browser sessionStorage
+browser IndexedDB
+```
+
+Mixed old state can make retry, cursor and direct chat reconciliation demos confusing.

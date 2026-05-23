@@ -10,7 +10,7 @@ final class HealthController
     {
         return response()->json([
             'ok' => true,
-            'service' => 'durable-chat-laravel-central',
+            'service' => 'durable-chat-laravel',
             'centralNodeId' => config('durable-chat.central_node_id'),
         ]);
     }

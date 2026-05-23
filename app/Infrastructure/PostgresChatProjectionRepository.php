@@ -4,11 +4,15 @@ namespace App\Infrastructure;
 
 use App\Contracts\ChatProjectionRepositoryInterface;
 use App\Domain\Events\ChatEventDto;
-use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\DB;
 
-final class PostgresChatProjectionRepository implements ChatProjectionRepositoryInterface
+final readonly class PostgresChatProjectionRepository implements ChatProjectionRepositoryInterface
 {
+    public function __construct(
+        private PostgresDateTime $dateTime,
+        private PostgresProjectionMapper $mapper,
+    ) {}
+
     public function userExists(string $userId): bool
     {
         return DB::table('users')->where('id', $userId)->exists();
@@ -54,16 +58,7 @@ final class PostgresChatProjectionRepository implements ChatProjectionRepository
 
     public function createChat(ChatEventDto $event, array $memberIds, ?string $directPairKey): void
     {
-        DB::table('chats')->insert([
-            'id' => $event->payload['chatId'],
-            'client_chat_id' => $event->payload['clientChatId'] ?? null,
-            'direct_pair_key' => $directPairKey,
-            'type' => $event->payload['type'],
-            'title' => isset($event->payload['title']) ? trim((string) $event->payload['title']) : null,
-            'created_by' => $event->actorUserId,
-            'created_at' => CarbonImmutable::parse($event->createdAt)->utc()->toISOString(),
-            'sync_status' => $event->syncStatus->value,
-        ]);
+        DB::table('chats')->insert($this->mapper->chatRow($event, $directPairKey));
 
         foreach ($memberIds as $memberId) {
             $this->addMember(
@@ -77,15 +72,11 @@ final class PostgresChatProjectionRepository implements ChatProjectionRepository
 
     public function addMember(string $chatId, string $memberId, string $joinedAt, bool $isOwner): void
     {
-        DB::table('chat_members')->upsert([
-            [
-                'chat_id' => $chatId,
-                'user_id' => $memberId,
-                'joined_at' => CarbonImmutable::parse($joinedAt)->utc()->toISOString(),
-                'left_at' => null,
-                'is_owner' => $isOwner,
-            ],
-        ], ['chat_id', 'user_id'], ['joined_at', 'left_at', 'is_owner']);
+        DB::table('chat_members')->upsert(
+            [$this->mapper->memberRow($chatId, $memberId, $joinedAt, $isOwner)],
+            ['chat_id', 'user_id'],
+            ['joined_at', 'left_at', 'is_owner'],
+        );
     }
 
     public function removeMember(string $chatId, string $memberId, string $leftAt): bool
@@ -95,30 +86,20 @@ final class PostgresChatProjectionRepository implements ChatProjectionRepository
             ->where('user_id', $memberId)
             ->where('is_owner', false)
             ->whereNull('left_at')
-            ->update(['left_at' => CarbonImmutable::parse($leftAt)->utc()->toISOString()]) > 0;
+            ->update(['left_at' => $this->dateTime->fromClientValue($leftAt)]) > 0;
     }
 
     public function createMessage(ChatEventDto $event): void
     {
-        DB::table('messages')->insert([
-            'id' => $event->payload['messageId'],
-            'client_message_id' => $event->payload['clientMessageId'],
-            'chat_id' => $event->payload['chatId'],
-            'sender_id' => $event->actorUserId,
-            'text' => $event->payload['text'],
-            'created_at' => CarbonImmutable::parse($event->createdAt)->utc()->toISOString(),
-            'sync_status' => $event->syncStatus->value,
-        ]);
+        DB::table('messages')->insert($this->mapper->messageRow($event));
     }
 
     public function markMessageRead(string $messageId, string $userId, string $readAt): void
     {
-        DB::table('message_reads')->upsert([
-            [
-                'message_id' => $messageId,
-                'user_id' => $userId,
-                'read_at' => CarbonImmutable::parse($readAt)->utc()->toISOString(),
-            ],
-        ], ['message_id', 'user_id'], ['read_at']);
+        DB::table('message_reads')->upsert(
+            [$this->mapper->messageReadRow($messageId, $userId, $readAt)],
+            ['message_id', 'user_id'],
+            ['read_at'],
+        );
     }
 }

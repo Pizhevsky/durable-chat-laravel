@@ -1,5 +1,5 @@
 {
-  "name": "pizhevsky/durable-chat-laravel-central",
+  "name": "pizhevsky/durable-chat-laravel",
   "type": "project",
   "description": "Laravel 12 and PostgreSQL central authority for Durable Chat Relay, built with PHP 8.x OOP boundaries for resilient event sync.",
   "keywords": ["laravel", "php8", "oop", "postgresql", "event-log", "resilient-sync", "chat"],

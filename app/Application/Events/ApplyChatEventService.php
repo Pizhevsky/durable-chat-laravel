@@ -19,8 +19,8 @@ final readonly class ApplyChatEventService
     public function __construct(
         private EventRepositoryInterface $events,
         private EventValidator $validator,
-        private CausalOrderingPolicy $causalOrdering,
         private EventProjector $projector,
+        private CausalOrderingPolicy $causalOrderingPolicy,
         private DirectChatKeyFactory $directChatKeyFactory,
         private ChatProjectionRepositoryInterface $chatProjection,
     ) {}
@@ -43,25 +43,29 @@ final readonly class ApplyChatEventService
                     return new ApplyEventResultDto($existingDirectChatEvent, false);
                 }
 
-                $this->causalOrdering->assertAcceptable($event);
+                $this->causalOrderingPolicy->assertSatisfied($event);
                 $this->events->store($event);
                 $this->projector->project($event);
 
                 return new ApplyEventResultDto($event, true);
             });
         } catch (QueryException $exception) {
-            $existing = $this->events->findByEventId($event->eventId);
+            $existing = $this->events->findByEventId($event->eventId)
+                ?? $this->findExistingDirectChatCreatedEvent($event);
+
             if ($existing !== null && $this->isUniqueConstraintViolation($exception)) {
                 return new ApplyEventResultDto($existing, false);
             }
 
-            $existingDirectChatEvent = $this->findExistingDirectChatCreatedEvent($event);
-            if ($existingDirectChatEvent !== null && $this->isUniqueConstraintViolation($exception)) {
-                return new ApplyEventResultDto($existingDirectChatEvent, false);
-            }
-
             throw $exception;
         }
+    }
+
+    private function isUniqueConstraintViolation(QueryException $exception): bool
+    {
+        $sqlState = (string) ($exception->errorInfo[0] ?? $exception->getCode());
+
+        return in_array($sqlState, ['23000', '23505'], true);
     }
 
     private function findExistingDirectChatCreatedEvent(ChatEventDto $event): ?ChatEventDto
@@ -83,12 +87,5 @@ final readonly class ApplyChatEventService
         $existingChatId = $this->chatProjection->directChatIdByPairKey($directPairKey);
 
         return $existingChatId === null ? null : $this->events->findChatCreatedEvent($existingChatId);
-    }
-
-    private function isUniqueConstraintViolation(QueryException $exception): bool
-    {
-        $sqlState = (string) ($exception->errorInfo[0] ?? '');
-
-        return in_array($sqlState, ['23000', '23505'], true);
     }
 }

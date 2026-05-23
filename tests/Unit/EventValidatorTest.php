@@ -4,6 +4,8 @@ namespace Tests\Unit;
 
 use App\Domain\Chats\DirectChatKeyFactory;
 use App\Domain\Events\ChatEventDto;
+use App\Domain\Events\EventPayloadFields;
+use App\Domain\Events\EventPayloadValidator;
 use App\Domain\Events\EventSyncStatus;
 use App\Domain\Events\EventType;
 use App\Domain\Events\EventValidator;
@@ -32,7 +34,7 @@ final class EventValidatorTest extends TestCase
             syncStatus: EventSyncStatus::Local,
         );
 
-        (new EventValidator(new DirectChatKeyFactory))->validate($event);
+        $this->validator()->validate($event);
 
         self::assertTrue(true);
     }
@@ -59,6 +61,11 @@ final class EventValidatorTest extends TestCase
             syncStatus: EventSyncStatus::Local,
         );
 
-        (new EventValidator(new DirectChatKeyFactory))->validate($event);
+        $this->validator()->validate($event);
+    }
+
+    private function validator(): EventValidator
+    {
+        return new EventValidator(new EventPayloadValidator(new DirectChatKeyFactory, new EventPayloadFields));
     }
 }

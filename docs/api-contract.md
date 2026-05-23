@@ -1,127 +1,157 @@
-# API contract
+# API Contract
 
-This Laravel service is the central authority for Durable Chat Relay. Helpers
-push local events to central in batches and pull missed central events by
-sequence.
+## Central identity
 
-Laravel has a fixed central server identity. Helper identity is preserved as
-event metadata such as `originNodeId`, `originDeviceId` and `sourceNodeId`.
-
-## Health
-
-```txt
-GET /api/health
-```
-
-Response:
+Laravel responses use:
 
 ```json
 {
-  "ok": true,
-  "service": "durable-chat-laravel-central",
   "centralNodeId": "laravel-central"
 }
 ```
 
-## Config
+Laravel includes `nodeRole: "central"` and `nodeId` only as compatibility fields for the existing helper contract. They are fixed response fields, not runtime role configuration.
 
-```txt
+## Public endpoints
+
+```http
+GET /api/health
+GET /api/readiness
 GET /api/config
+GET /api/users
+GET /api/chats
+GET /api/chats/{chatId}/messages
+POST /api/events
 ```
 
-Response:
+`POST /api/events` is a demo direct event endpoint. The integrated helper path uses `/api/sync/events`.
+
+## Signed helper endpoints
+
+```http
+POST /api/sync/events
+GET  /api/sync/events?since=0&limit=200
+GET  /api/recovery/export
+POST /api/recovery/import
+```
+
+These endpoints require:
+
+```txt
+X-DCR-Helper-Id
+X-DCR-Timestamp
+X-DCR-Signature
+```
+
+The signature payload is:
+
+```txt
+timestamp + "
+" + method + "
+" + path-with-query + "
+" + raw-body
+```
+
+See `docs/helper-central-auth.md`.
+
+## Health
+
+```http
+GET /api/health
+```
+
+Checks that the Laravel app is running.
+
+Example:
 
 ```json
 {
-  "centralNodeId": "laravel-central",
-  "centralUrl": "http://127.0.0.1:8000",
-  "vapidPublicKey": null
+  "ok": true,
+  "service": "durable-chat-laravel",
+  "centralNodeId": "laravel-central"
 }
 ```
 
-## Users
+## Readiness
 
-```txt
-GET /api/users
+```http
+GET /api/readiness
 ```
 
-Returns the central user list used by chat projection and membership checks.
+Checks that Laravel can reach PostgreSQL and the events table.
 
-## Chats
+Example:
 
-```txt
-GET /api/chats?userId=u-denis
+```json
+{
+  "ok": true,
+  "service": "durable-chat-laravel",
+  "centralNodeId": "laravel-central",
+  "checks": {
+    "database": "ok",
+    "eventsTable": "ok"
+  }
+}
 ```
 
-Returns active chats for the requested user, including members, unread counts
-and last-message summaries.
+## Sync push
 
-## Messages
-
-```txt
-GET /api/chats/{chatId}/messages?userId=u-denis
-```
-
-Returns messages only when the requested user is an active chat member.
-
-## Publish One Event
-
-```txt
-POST /api/events
-x-demo-user-id: u-denis
-```
-
-This endpoint supports direct development checks. The normal resilience path is
-batch sync from the helper through `POST /api/sync/events`.
-
-## Push Events
-
-```txt
+```http
 POST /api/sync/events
 ```
+
+Accepts helper event batches.
 
 Request:
 
 ```json
 {
   "sourceNodeId": "helper-demo",
-  "events": []
+  "events": [
+    {
+      "eventId": "device-1:event-1",
+      "originNodeId": "helper-demo",
+      "originDeviceId": "device-1",
+      "actorUserId": "u-denis",
+      "chatId": "chat-1",
+      "type": "chat.created",
+      "payload": {
+        "chatId": "chat-1",
+        "type": "direct",
+        "clientChatId": "client-chat-1",
+        "memberIds": ["u-anna"]
+      },
+      "createdAt": "2026-05-22T00:00:00.000Z",
+      "logicalClock": 1,
+      "syncStatus": "local"
+    }
+  ]
 }
 ```
+
+`createdAt` is the event timestamp supplied by the helper/client. Laravel stores
+it as PostgreSQL `timestamptz` and returns it as a UTC ISO string. The central
+event log also stores `client_created_at` and `central_received_at` separately,
+so event time and central ingestion time are not conflated.
 
 Response:
 
 ```json
 {
-  "accepted": [],
+  "accepted": ["device-1:event-1"],
   "duplicates": [],
-  "conflictIds": [],
   "conflicts": [],
   "serverEvents": [],
+  "nodeRole": "central",
+  "nodeId": "laravel-central",
   "centralNodeId": "laravel-central",
-  "meta": {
-    "syncAttemptId": "uuid",
-    "sourceNodeId": "helper-demo",
-    "receivedAt": "2026-05-20T10:00:00.000000Z",
-    "completedAt": "2026-05-20T10:00:00.000000Z",
-    "orderingPolicy": "batch-order-with-per-device-logical-clock",
-    "replayGuarantee": "eventId and direct-chat uniqueness are idempotent; accepted events are returned in central sequence order by pull sync",
-    "counts": {
-      "received": 0,
-      "accepted": 0,
-      "duplicates": 0,
-      "conflicts": 0,
-      "serverEvents": 0
-    }
-  }
+  "dryRun": false
 }
 ```
 
-`conflicts` is the central rejection channel. Laravel returns a conflict when
-storing the event would make central state untrue, for example when the actor
-user is unknown or an event depends on a chat that central has not accepted yet.
+`serverEvents` may contain authoritative central events that the helper must apply locally. This is important for direct chat reconciliation between several helpers.
 
-Conflict object:
+Conflicts include a stable code, category and retryability hint:
 
 ```json
 {
@@ -134,76 +164,51 @@ Conflict object:
 }
 ```
 
-`conflictIds` is a compatibility field for helpers that only need rejected event
-IDs. New clients should prefer `conflicts`, which includes stable codes,
-categories, messages and retryability.
+Current categories are `validation`, `missing_reference`, `causal_ordering`,
+`domain_rule`, `duplicate` and `temporary`.
 
-`retryable: true` means the event may become valid after a missing prerequisite
-is fixed. Examples include `USER_NOT_FOUND` after users are seeded and
-`CAUSAL_DEPENDENCY_MISSING` after the parent chat or message is accepted.
+Laravel enforces per-device logical clock advancement before accepting new
+events. Events that depend on a chat or message central has not accepted yet
+are rejected as `CAUSAL_DEPENDENCY_MISSING` so helpers can retry after the
+missing prerequisite arrives.
 
-Central applies each batch in submitted order. For new events from the same
-origin device, `logicalClock` must strictly advance beyond the latest accepted
-event for that device. Replaying the same `eventId` is idempotent and returns
-the existing central event as a duplicate.
+## Sync pull
 
-## Pull Events
-
-```txt
-GET /api/sync/events?since=0&limit=500
+```http
+GET /api/sync/events?since=0&limit=200
 ```
+
+Returns central events after a sequence cursor.
 
 Response:
 
 ```json
 {
+  "nodeRole": "central",
+  "nodeId": "laravel-central",
   "centralNodeId": "laravel-central",
-  "latestSequence": 0,
-  "limit": 500,
+  "latestSequence": 10,
+  "currentSequence": 12,
+  "hasMore": true,
   "events": []
 }
 ```
 
-Pull sync is bounded. `limit` defaults to `DCR_SYNC_PULL_LIMIT` and is capped by
-`DCR_MAX_SYNC_PULL_LIMIT`, so a helper cannot accidentally request the entire
-event log in one response.
+`latestSequence` is the last returned sequence in this response. The helper stores it as the next cursor. This prevents skipped events when there are more central events than one response limit.
 
-Events are returned in central sequence order. Event timestamps are stored in
-PostgreSQL as `timestamptz` and returned as UTC ISO strings.
+## Recovery dry run
 
-## Recovery Export
-
-```txt
-GET /api/recovery/export?userId=u-denis&deviceId=device-1
+```http
+POST /api/recovery/import?dryRun=true
 ```
 
-Recovery exports include:
+Previews a recovery import without writing events or projections.
 
-```json
-{
-  "format": "durable-chat-recovery-v1",
-  "latestSequence": 0,
-  "eventCount": 0,
-  "exportLimit": 10000,
-  "truncated": false,
-  "checksum": "sha256",
-  "orderingPolicy": "central-sequence-ascending",
-  "events": []
-}
-```
+Recovery import uses the same signed helper authorization and the same sync
+rules as a real import. Dry run executes the import path inside a rollback, so
+validation, causal ordering, idempotency and projection conflicts match the
+non-dry-run behaviour.
 
-## Recovery Import
+## SHA-256 recovery checksum
 
-```txt
-POST /api/recovery/import
-```
-
-Imports accept the same recovery format:
-
-```txt
-durable-chat-recovery-v1
-```
-
-When `checksum` is present, Laravel verifies it against the ordered `events`
-array before importing. Imports reuse the same sync service as helper sync, so
-replay remains idempotent by `eventId` and reports the same conflict taxonomy.
+Recovery exports include a SHA-256 checksum calculated from the canonical events payload. Recovery import verifies this checksum before accepting or previewing events, so truncated or manually corrupted dumps are rejected instead of being applied silently.

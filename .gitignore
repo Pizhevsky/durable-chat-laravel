@@ -1,6 +1,5 @@
 /vendor
 /node_modules
-.DS_Store
 /public/build
 /public/hot
 /storage/*.key

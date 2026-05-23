@@ -13,30 +13,47 @@ final readonly class CausalOrderingPolicy
         private ChatProjectionRepositoryInterface $projection,
     ) {}
 
-    public function assertAcceptable(ChatEventDto $event): void
+    public function assertSatisfied(ChatEventDto $event): void
     {
-        $latestLogicalClock = $this->events->latestLogicalClockForOriginDevice($event->originDeviceId);
-        if ($latestLogicalClock !== null && $event->logicalClock <= $latestLogicalClock) {
+        $this->assertLogicalClockAdvances($event);
+
+        match ($event->type) {
+            EventType::ChatCreated => null,
+            EventType::MemberAdded,
+            EventType::MemberRemoved,
+            EventType::MessageCreated => $this->assertChatExists($event->payload['chatId']),
+            EventType::MessageRead => $this->assertMessageReadDependencies($event),
+        };
+    }
+
+    private function assertLogicalClockAdvances(ChatEventDto $event): void
+    {
+        $maxClock = $this->events->maxLogicalClockForDevice($event->originDeviceId);
+        if ($maxClock !== null && $event->logicalClock <= $maxClock) {
             throw new DomainRuleException(
-                'Event logicalClock must advance for the origin device.',
+                'Event logical clock is not newer than the latest accepted event from this device.',
                 409,
-                'CAUSAL_CLOCK_REGRESSION',
+                'LOGICAL_CLOCK_REGRESSION',
             );
         }
+    }
 
-        if ($event->type === EventType::ChatCreated) {
-            return;
-        }
-
-        if ($this->projection->findChat($event->chatId) === null) {
+    private function assertChatExists(string $chatId): void
+    {
+        if ($this->projection->findChat($chatId) === null) {
             throw new DomainRuleException(
                 'Event depends on a chat that has not been accepted by central yet.',
                 409,
                 'CAUSAL_DEPENDENCY_MISSING',
             );
         }
+    }
 
-        if ($event->type === EventType::MessageRead && ! $this->projection->messageExists((string) ($event->payload['messageId'] ?? ''))) {
+    private function assertMessageReadDependencies(ChatEventDto $event): void
+    {
+        $this->assertChatExists($event->payload['chatId']);
+
+        if (! $this->projection->messageExists($event->payload['messageId'])) {
             throw new DomainRuleException(
                 'Read receipt depends on a message that has not been accepted by central yet.',
                 409,

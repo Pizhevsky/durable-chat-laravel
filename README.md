@@ -1,209 +1,194 @@
-# Durable Chat Relay Laravel Central Server
+# Durable Chat Relay
 
-PHP 8.x and Laravel 12 central server for Durable Chat Relay.
+A resilience prototype for field teams who need chat actions to survive unreliable connectivity.
 
-This project replaces the original Node.js central backend with a Laravel and PostgreSQL authority while keeping the original Node.js helper as the local resilience layer.
+The system lets users keep sending chat events through a local helper while the central server is unavailable. When central returns, the helper retries pending events, Laravel accepts signed sync traffic, duplicates are ignored, conflicts are reported, and all clients converge on one official chat history.
 
-```txt
-Vue client
-   ↓ Socket.IO / local API
-Original Node.js helper
-   ↓ HTTP sync batches
-Laravel 12 central API
-   ↓
-PostgreSQL durable event log
-```
+This repository is the Laravel 12 and PostgreSQL central authority for the wider Durable Chat Relay prototype. The original project keeps the Vue client, Node.js helper, Socket.IO, IndexedDB recovery and peer-assisted WebRTC fallback. Laravel replaces only the central authority layer with a PHP 8.x OOP backend and durable PostgreSQL event store.
 
-## Project goals
-
-- Provide a Laravel 12 central API for Durable Chat Relay
-- Store the authoritative event log in PostgreSQL
-- Preserve compatibility with the existing Node.js helper sync flow
-- Keep HTTP controllers thin and move behaviour into application services
-- Use PHP 8.x OOP structure with DTOs, enums, repository interfaces and domain services
-- Enforce central idempotency for repeated helper sync attempts
-- Return structured conflict metadata for rejected events
-- Apply causal ordering checks for sync batches
-- Project event data into read models for chats, members, messages and read state
-- Support bounded pull sync and checksum-verified recovery imports
-- Keep local resilience concerns outside Laravel and inside the original helper
-
-## Architecture boundary
-
-Laravel is always the central server. It does not run in helper mode and does not expose a configurable node role.
-
-The original helper remains responsible for local Socket.IO communication, local SQLite durability, retries, peer assisted relay and client recovery behaviour.
-
-Laravel owns the server side rules:
-
-- event validation
-- idempotent event storage
-- direct chat duplicate protection
-- chat membership rules
-- message projection
-- recovery import validation
-- recovery checksum verification
-- PostgreSQL persistence
-
-## Design highlights
-
-- Transactional event acceptance with database-backed idempotency
-- Partial unique index for direct chat pair protection
-- Per-device logical clock checks for causal ordering
-- Structured sync conflicts with stable codes, categories and retryability
-- Bounded pull sync for catch-up without unbounded event-log responses
-- `timestamptz` storage with UTC ISO output for event timestamps
-- Checksum-verified recovery imports
-- Read models for chat lists, members, messages and read state
-
-## Development Setup
-
-Create the PostgreSQL database and user first:
+The value is the boundary:
 
 ```txt
-Database: durable_chat
-User: durable_chat
-Password: postgres
+local availability != central authority
 ```
 
-Then run:
+The helper keeps local work recoverable. Laravel owns the authoritative event log, idempotent projection, recovery checksum validation, helper trust boundary and direct chat reconciliation.
+
+## Smallest Demo
+
+```txt
+1. Start Laravel central.
+2. Start the original helper and Vue client with npm run dev:laravel.
+3. Send chat events through the helper.
+4. Stop or disconnect central, keep sending locally, then bring central back.
+5. Watch the helper retry pending events and Laravel converge to one official history.
+```
+
+Expected result:
+
+```txt
+pending helper events are retried
+duplicate event ids are accepted once
+conflicts are returned with structured codes
+direct chat duplicates converge to one central chat id
+read APIs show the official PostgreSQL-backed state
+```
+
+## System Map
+
+```txt
+Vue client :1234
+   |
+   | Socket.IO and helper API
+   v
+Original Node helper :3001
+   |
+   | signed HTTP sync
+   v
+Laravel 12 central API :8000
+   |
+   v
+PostgreSQL
+```
+
+Laravel is designed to be used together with the original helper, not as a direct replacement for the browser/client runtime. It does not host the Socket.IO endpoint used by the Vue client.
+
+## What this project proves
+
+- A resilient chat prototype can separate local availability from central authority.
+- Laravel can rebuild the central authority in another backend stack without changing the helper contract.
+- Helper sync is signed with HMAC before Laravel accepts push or pull traffic.
+- Helpers can retry events safely because event ids are idempotent.
+- Missed central events are pulled by cursor without skipping paged results.
+- Direct chat duplication is blocked by domain logic and PostgreSQL constraints.
+- Several helpers can reconcile duplicate offline direct chats to one central chat id.
+- Chat state is projected from durable events into read models.
+- Event timestamps are stored as PostgreSQL `timestamptz`, not strings.
+- Recovery import can be previewed with dry run before writing to the database.
+- The API uses PHP 8.x OOP boundaries with services, DTOs, enums and repositories.
+
+## Intentional Limits
+
+This is not the browser facing chat server. It does not host the Socket.IO endpoint used by the Vue client and it does not implement the browser IndexedDB or WebRTC paths. Those belong to the original Durable Chat Relay project.
+
+It is also not a production secure messaging platform. It has helper to central request signing, but it does not include full user authentication, per chat authorization, signed browser events, message encryption, production deployment or observability dashboards.
+
+## Stack
+
+| Area | Technology |
+|---|---|
+| Backend | Laravel 12, PHP 8.x |
+| Database | PostgreSQL |
+| API | JSON REST |
+| Helper authorization | HMAC signed helper sync requests |
+| Domain design | Services, DTOs, enums, repositories, domain exceptions |
+| Helper compatibility | Original Node.js helper from Durable Chat Relay |
+| Tests | Laravel feature and unit tests |
+
+## Quick start
+
+Create a PostgreSQL database and configure `.env`:
+
+```env
+DB_CONNECTION=pgsql
+DB_HOST=127.0.0.1
+DB_PORT=5432
+DB_DATABASE=durable_chat
+DB_USERNAME=durable_chat
+DB_PASSWORD=postgres
+
+DCR_CENTRAL_NODE_ID=laravel-central
+DCR_HELPER_SHARED_SECRET=local-dev-helper-secret
+DCR_TRUSTED_HELPER_IDS=helper-demo
+DCR_HELPER_SIGNATURE_TOLERANCE_SECONDS=300
+```
+
+Install and run Laravel:
 
 ```bash
-cp .env.example .env
 composer install
+cp .env.example .env
 php artisan key:generate
 php artisan migrate:fresh --seed
 php artisan serve --host=127.0.0.1 --port=8000
 ```
 
-Check Laravel:
+Check the central API:
 
 ```bash
 curl http://127.0.0.1:8000/api/health
-curl http://127.0.0.1:8000/api/users
+curl http://127.0.0.1:8000/api/readiness
 ```
 
-Expected health response:
+## Run with the original helper
 
-```json
-{
-  "ok": true,
-  "service": "durable-chat-laravel-central",
-  "centralNodeId": "laravel-central"
-}
-```
-
-## Connect the original helper
-
-In the original Durable Chat Relay project, run the helper with Laravel as the central target:
+In the original Durable Chat Relay project, start the helper and client with the Laravel integration script:
 
 ```bash
-CENTRAL_URL=http://127.0.0.1:8000 npm run helper
+npm run dev:laravel
 ```
 
-Do **not** run the old Node central backend for this architecture.
-
-Start the existing client and point it at the helper:
+Open the client through the helper:
 
 ```txt
-http://localhost:1234/?api=http://localhost:3001
+http://localhost:1234?api=http://localhost:3001
 ```
 
-Full instructions are in:
+Do not run `npm run dev` in the original project when testing Laravel integration. That starts the old Node central path. Do not point the Vue client directly to Laravel either. Laravel does not provide the Socket.IO endpoint used by the client.
 
-```txt
-docs/original-helper-integration.md
+## Demo scripts
+
+Run Laravel first, then use the signed demo scripts:
+
+```bash
+scripts/demo-sync.sh
+scripts/demo-duplicate-retry.sh
+scripts/demo-recovery-dry-run.sh
 ```
 
-## Central sync API
+Each script accepts `BASE_URL` and `DCR_HELPER_SHARED_SECRET` if your local values differ:
 
-The original helper uses these endpoints:
-
-```txt
-POST /api/sync/events
-GET  /api/sync/events?since=0
+```bash
+BASE_URL=http://127.0.0.1:8000 DCR_HELPER_SHARED_SECRET=local-dev-helper-secret scripts/demo-sync.sh
 ```
 
-Push response:
+## Main endpoints
 
-```json
-{
-  "accepted": [],
-  "duplicates": [],
-  "conflictIds": [],
-  "conflicts": [],
-  "serverEvents": [],
-  "centralNodeId": "laravel-central",
-  "meta": {
-    "syncAttemptId": "uuid",
-    "sourceNodeId": "helper-demo",
-    "orderingPolicy": "batch-order-with-per-device-logical-clock",
-    "counts": {
-      "received": 0,
-      "accepted": 0,
-      "duplicates": 0,
-      "conflicts": 0,
-      "serverEvents": 0
-    }
-  }
-}
+```http
+GET  /api/health
+GET  /api/readiness
+GET  /api/config
+GET  /api/users
+GET  /api/chats
+GET  /api/chats/{chatId}/messages
+POST /api/events
+POST /api/sync/events        signed helper request
+GET  /api/sync/events        signed helper request
+GET  /api/recovery/export    signed helper request
+POST /api/recovery/import    signed helper request
 ```
-
-Pull response:
-
-```json
-{
-  "centralNodeId": "laravel-central",
-  "latestSequence": 0,
-  "limit": 500,
-  "events": []
-}
-```
-
-Pull sync is bounded with `limit`. Recovery exports include an ordered event
-checksum and export limit metadata, and recovery imports verify the checksum
-when present.
-
-## OOP structure
-
-```txt
-app/
-  Application/
-    Events/
-    Messages/
-    Recovery/
-    Sync/
-  Contracts/
-  Domain/
-    Chats/
-    Events/
-    Shared/
-  Infrastructure/
-    PostgresChatProjectionRepository.php
-    PostgresChatQueryRepository.php
-    PostgresChatSummaryLoader.php
-    PostgresEventRepository.php
-    PostgresMessageHydrator.php
-  Http/
-    Controllers/
-```
-
-Laravel handles routing, dependency injection, request/response flow and database integration. Durable chat behaviour is separated into typed services, DTOs, repositories and domain classes.
 
 ## Documentation
 
-```txt
-docs/api-contract.md
-docs/oop-design.md
-docs/resilience-scenarios.md
-docs/original-helper-integration.md
-docs/git-description.md
-```
+- `docs/shared-integration-contract.md` explains the contract duplicated across both projects.
+- `docs/architecture.md` explains Laravel's central role.
+- `docs/api-contract.md` documents the HTTP API and signed sync contract.
+- `docs/helper-central-auth.md` explains HMAC helper authorization.
+- `docs/original-helper-integration.md` explains how to run this with the original helper.
+- `docs/original-project-alignment.md` explains what belongs to the original project and what belongs here.
+- `docs/demo-guide.md` gives repeatable demo scenarios.
+- `docs/oop-design.md` explains the PHP 8.x OOP structure.
 
-## Useful commands
+## Local verification
 
 ```bash
-php artisan durable-chat:about
+composer install
+php artisan migrate:fresh --seed
 php artisan test
-vendor/bin/pint
 ```
+
+The combined system should also be tested with the original helper using `npm run dev:laravel` from the original project.
+
+## SHA-256 recovery checksum
+
+Recovery exports include a SHA-256 checksum calculated from the canonical events payload. Recovery import verifies this checksum before accepting or previewing events, so truncated or manually corrupted dumps are rejected instead of being applied silently.

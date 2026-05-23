@@ -3,14 +3,13 @@
 namespace App\Domain\Events;
 
 use App\Contracts\ChatProjectionRepositoryInterface;
-use App\Domain\Chats\DirectChatKeyFactory;
 use App\Domain\Shared\DomainRuleException;
 
 final readonly class EventProjector
 {
     public function __construct(
         private ChatProjectionRepositoryInterface $projection,
-        private DirectChatKeyFactory $directChatKeyFactory,
+        private EventProjectionRules $rules,
     ) {}
 
     public function project(ChatEventDto $event): void
@@ -27,39 +26,30 @@ final readonly class EventProjector
     private function projectChatCreated(ChatEventDto $event): void
     {
         $payload = $event->payload;
-        $memberIds = array_values(array_unique([$event->actorUserId, ...$payload['memberIds']]));
+        $memberIds = $this->rules->uniqueChatMemberIds($event);
         $directPairKey = $payload['type'] === 'direct'
-            ? $this->directChatKeyFactory->make($memberIds)
+            ? $this->rules->directPairKeyFor($memberIds)
             : null;
 
-        if ($directPairKey !== null && $this->projection->directChatIdByPairKey($directPairKey) !== null) {
-            throw new DomainRuleException('A direct chat for this pair already exists.', 409, 'DIRECT_CHAT_EXISTS');
-        }
-
-        foreach ($memberIds as $memberId) {
-            if (! $this->projection->userExists($memberId)) {
-                throw new DomainRuleException("Unknown user: {$memberId}", 404, 'USER_NOT_FOUND');
-            }
-        }
+        $this->rules->assertDirectChatDoesNotExist($directPairKey);
+        $this->rules->assertUsersExist($memberIds);
 
         $this->projection->createChat($event, $memberIds, $directPairKey);
     }
 
     private function projectMemberAdded(ChatEventDto $event): void
     {
-        $this->assertGroupOwner($event->payload['chatId'], $event->actorUserId);
+        $this->rules->assertGroupOwner($event->payload['chatId'], $event->actorUserId);
 
         $memberId = (string) $event->payload['memberId'];
-        if (! $this->projection->userExists($memberId)) {
-            throw new DomainRuleException("Unknown user: {$memberId}", 404, 'USER_NOT_FOUND');
-        }
+        $this->rules->assertUserExists($memberId);
 
         $this->projection->addMember($event->payload['chatId'], $memberId, $event->createdAt, false);
     }
 
     private function projectMemberRemoved(ChatEventDto $event): void
     {
-        $chat = $this->assertGroupOwner($event->payload['chatId'], $event->actorUserId);
+        $chat = $this->rules->assertGroupOwner($event->payload['chatId'], $event->actorUserId);
         $memberId = (string) $event->payload['memberId'];
 
         if ($chat['type'] === 'direct') {
@@ -77,9 +67,7 @@ final readonly class EventProjector
 
     private function projectMessageCreated(ChatEventDto $event): void
     {
-        if (! $this->projection->isActiveMember($event->payload['chatId'], $event->actorUserId)) {
-            throw new DomainRuleException('User is not an active chat member.', 403, 'NOT_CHAT_MEMBER');
-        }
+        $this->rules->assertActiveMember($event->payload['chatId'], $event->actorUserId);
 
         $this->projection->createMessage($event);
         $this->projection->markMessageRead($event->payload['messageId'], $event->actorUserId, $event->createdAt);
@@ -87,29 +75,8 @@ final readonly class EventProjector
 
     private function projectMessageRead(ChatEventDto $event): void
     {
-        if (! $this->projection->isActiveMember($event->payload['chatId'], $event->actorUserId)) {
-            throw new DomainRuleException('User is not an active chat member.', 403, 'NOT_CHAT_MEMBER');
-        }
+        $this->rules->assertActiveMember($event->payload['chatId'], $event->actorUserId);
 
         $this->projection->markMessageRead($event->payload['messageId'], $event->actorUserId, $event->createdAt);
-    }
-
-    /** @return array{id: string, type: string} */
-    private function assertGroupOwner(string $chatId, string $userId): array
-    {
-        $chat = $this->projection->findChat($chatId);
-        if ($chat === null) {
-            throw new DomainRuleException('Chat not found.', 404, 'CHAT_NOT_FOUND');
-        }
-
-        if ($chat['type'] !== 'group') {
-            throw new DomainRuleException('Membership changes are only supported for group chats.', 422, 'NOT_GROUP_CHAT');
-        }
-
-        if (! $this->projection->isGroupOwner($chatId, $userId)) {
-            throw new DomainRuleException('Only the group owner can change members.', 403, 'NOT_GROUP_OWNER');
-        }
-
-        return $chat;
     }
 }

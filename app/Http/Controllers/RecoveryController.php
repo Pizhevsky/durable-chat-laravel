@@ -27,7 +27,10 @@ final readonly class RecoveryController
 
     public function import(Request $request): JsonResponse
     {
-        $result = $this->importRecoveryDump->import($request->json()->all());
+        $result = $this->importRecoveryDump->import(
+            $request->json()->all(),
+            $request->boolean('dryRun'),
+        );
 
         return response()->json($result->toResponseArray());
     }

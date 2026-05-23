@@ -2,12 +2,12 @@
 
 namespace App\Http\Controllers;
 
-use App\Contracts\ChatQueryRepositoryInterface;
+use App\Contracts\UserQueryRepositoryInterface;
 use Illuminate\Http\JsonResponse;
 
 final readonly class UserController
 {
-    public function __construct(private ChatQueryRepositoryInterface $queries) {}
+    public function __construct(private UserQueryRepositoryInterface $queries) {}
 
     public function index(): JsonResponse
     {

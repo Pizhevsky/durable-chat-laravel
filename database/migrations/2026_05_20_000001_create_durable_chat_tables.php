@@ -75,6 +75,8 @@ return new class extends Migration
             $table->string('type');
             $table->jsonb('payload_json');
             $table->dateTimeTz('created_at');
+            $table->dateTimeTz('client_created_at')->nullable();
+            $table->dateTimeTz('central_received_at')->useCurrent();
             $table->unsignedBigInteger('logical_clock');
             $table->string('sync_status');
             $table->index('sequence');
@@ -94,6 +96,14 @@ return new class extends Migration
             $table->string('key')->primary();
             $table->string('value');
         });
+
+        DB::statement("ALTER TABLE chats ADD CONSTRAINT chk_chats_type CHECK (type IN ('direct', 'group'))");
+        DB::statement("ALTER TABLE chats ADD CONSTRAINT chk_chats_sync_status CHECK (sync_status IN ('local', 'peer-replicated', 'helper-synced', 'central-synced', 'conflict'))");
+        DB::statement("ALTER TABLE chats ADD CONSTRAINT chk_chats_direct_pair_required CHECK (type <> 'direct' OR direct_pair_key IS NOT NULL)");
+        DB::statement("ALTER TABLE messages ADD CONSTRAINT chk_messages_sync_status CHECK (sync_status IN ('local', 'peer-replicated', 'helper-synced', 'central-synced', 'conflict'))");
+        DB::statement("ALTER TABLE events ADD CONSTRAINT chk_events_type CHECK (type IN ('chat.created', 'member.added', 'member.removed', 'message.created', 'message.read'))");
+        DB::statement("ALTER TABLE events ADD CONSTRAINT chk_events_sync_status CHECK (sync_status IN ('local', 'peer-replicated', 'helper-synced', 'central-synced', 'conflict'))");
+        DB::statement('ALTER TABLE events ADD CONSTRAINT chk_events_logical_clock CHECK (logical_clock >= 0)');
     }
 
     public function down(): void
