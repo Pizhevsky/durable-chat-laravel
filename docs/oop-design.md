@@ -1,168 +1,110 @@
 # PHP 8.x OOP Design
 
-## Design goal
-
-Laravel handles routing, dependency injection, middleware, migrations and HTTP responses. The durable chat rules live in typed PHP classes.
+Laravel handles routing, dependency injection, middleware, migrations and HTTP responses. The durable chat rules live in typed PHP classes with clear responsibilities.
 
 ```txt
-Controller -> Application service -> Domain service -> Repository -> PostgreSQL
+Controller -> Application service -> Domain service / Policy -> Repository -> PostgreSQL
 ```
 
 ## Main boundaries
 
 | Layer | Responsibility |
 |---|---|
-| Controllers | HTTP request and JSON response |
-| Application services | Use case orchestration |
-| DTOs | Explicit typed boundaries between layers |
-| Enums | Controlled event and status values |
-| Domain services | Validation, projection, pair key rules |
-| Repositories | Persistence contracts |
-| Infrastructure | PostgreSQL/Eloquent query implementation |
+| Controllers | HTTP request and JSON response. |
+| Middleware | HTTP boundary concerns such as helper signature verification. |
+| Application services | Use case orchestration and transactions. |
+| DTOs | Typed input/output boundaries between layers. |
+| Enums | Controlled event and sync status values. |
+| Policies | Membership and direct-chat rule checks. |
+| Domain services | Event validation, projection and domain calculations. |
+| Repositories | Persistence contracts. |
+| Infrastructure | PostgreSQL query implementation and mapping. |
 
-## Thin controllers
+## Services
 
-Controllers do not contain projection rules or database invariants. For example, `SyncController` reads the incoming `events` array, calls `SyncEventsService`, and returns the result.
-
-That keeps controller code small and makes sync rules easier to test.
-
-## Application services
-
-Important use cases are represented by application services:
+Application services keep controllers small:
 
 ```txt
 SyncEventsService
 ApplyChatEventService
-ExportRecoveryDumpService
+ListMessagesService
 ImportRecoveryDumpService
-RecoveryChecksum
+ExportRecoveryDumpService
 ```
 
-These classes coordinate validation, persistence and projection.
+These services coordinate validation, idempotency, persistence and projection. Controllers do not contain event business rules.
 
-## DTOs
+## Repositories and read/write split
 
-DTOs make event boundaries explicit:
+The code separates write projection from read queries:
 
 ```txt
-ChatEventDto
-ApplyEventResultDto
-SyncEventsResultDto
+ChatProjectionRepositoryInterface   -> write/projection side
+ChatListQueryRepositoryInterface    -> read/query side
+MessageQueryRepositoryInterface     -> read/query side
+UserQueryRepositoryInterface        -> read/query side
+EventRepositoryInterface            -> durable event log
 ```
 
-The event DTO carries the central sync contract:
+This lets read queries be optimised independently. For example, chat summaries can use PostgreSQL-specific latest-message queries without leaking that detail into domain services.
+
+## Helper signature verifier
+
+`HelperSignatureVerifier` owns helper-to-central trust checks:
 
 ```txt
-event id
-origin node id
-origin device id
-actor user id
-chat id
-event type
-payload
-created time
-logical clock
-sync status
+known helper id
+timestamp tolerance
+raw request body signature
+constant-time HMAC comparison
 ```
 
-## Enums
+The HTTP middleware delegates to this class. That keeps the security rule testable outside the framework boundary.
 
-Enums avoid uncontrolled string values inside the domain layer:
+## Direct pair key value object
+
+`DirectPairKey` represents the canonical identity of a direct chat:
 
 ```txt
-EventType
-EventSyncStatus
-ChatType
+two unique users
+sorted stable order
+same pair always produces the same key
 ```
 
-PostgreSQL check constraints also protect the same controlled values below application code.
+This avoids treating a direct pair key as a random string and supports multi-helper reconciliation.
 
-## Domain services
+## Policies
 
-The most important domain services are:
+Rules that decide whether an action is allowed belong in policy-style classes, not in repositories.
+
+Examples:
 
 ```txt
-EventValidator
-EventPayloadValidator
-EventPayloadFields
-EventProjector
-EventProjectionRules
-DirectChatKeyFactory
+ChatMembershipPolicy
+DirectChatPolicy
 ```
 
-`EventValidator` checks event envelope fields before projection. `EventPayloadValidator`
-and `EventPayloadFields` keep event-specific payload rules and primitive field checks
-separate.
+Repositories load data. Policies express business rules. Application services decide when to call them.
 
-`EventProjector` updates read models from accepted events. `EventProjectionRules`
-holds reusable guard checks such as active membership, known users and group
-ownership.
+## Why there is no full pipeline yet
 
-`DirectChatKeyFactory` creates a canonical sorted pair key so a direct chat has one identity regardless of participant order.
-
-## Repository interfaces
-
-Application and domain services depend on interfaces:
+The event acceptance flow is currently simple enough to stay readable inside services:
 
 ```txt
-EventRepositoryInterface
-ChatProjectionRepositoryInterface
-UserQueryRepositoryInterface
-ChatListQueryRepositoryInterface
-MessageQueryRepositoryInterface
+validate -> idempotency check -> store event -> project read model -> build result
 ```
 
-The PostgreSQL implementation sits under:
+A full pipeline would be useful if there are many optional stages such as audit logging, moderation, rate limits or async queue processing. For this portfolio version, smaller services and policies give the value without adding unnecessary indirection.
+
+## What this demonstrates
+
+The project is not trying to show every OOP pattern. It uses OOP where it protects the important system behaviours:
 
 ```txt
-app/Infrastructure
+signed helper sync
+idempotent event acceptance
+direct chat reconciliation
+membership rule boundaries
+PostgreSQL-backed event projection
+recovery checksum validation
 ```
-
-This keeps the central sync logic from depending directly on controller code or raw database calls.
-
-Query-side infrastructure is split by read responsibility:
-
-```txt
-PostgresUserQueryRepository
-PostgresChatListQueryRepository
-PostgresMessageQueryRepository
-PostgresChatMemberQuery
-PostgresChatSummaryQuery
-PostgresMessageHydrator
-PostgresEventMapper
-PostgresProjectionMapper
-PostgresDateTime
-```
-
-That keeps user listing, chat summaries, message reads, member loading and
-message/event hydration from accumulating in one broad repository.
-
-## Database constraints as part of design
-
-The project does not rely only on service code for correctness. The migration adds constraints for:
-
-- unique event ids
-- unique direct pair keys
-- unique chat membership rows
-- unique message ids
-- controlled event types
-- controlled sync statuses
-- non-negative logical clocks
-
-That is important for a resilient sync system because retries, recovery imports and helper reconnects can repeat the same logical action.
-
-## Tests that protect the design
-
-| Test | Purpose |
-|---|---|
-| `HelperContractTest` | Verifies helper-facing API response shape |
-| `IdempotencyProjectionTest` | Verifies duplicate retries do not duplicate projections |
-| `DirectChatDuplicateProtectionTest` | Verifies same direct pair creates one chat |
-| `PostgresConstraintTest` | Verifies database constraints protect invariants |
-| `RecoveryDryRunTest` | Verifies recovery preview does not write rows |
-| `EventValidatorTest` | Verifies invalid domain payloads are rejected |
-| `DirectChatKeyFactoryTest` | Verifies pair key canonicalisation |
-
-## Why this matters
-
-The project is small enough to read, but structured like a real backend component. The code shows that the central server has clear responsibilities, explicit contracts and protected invariants.
